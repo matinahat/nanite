@@ -9,6 +9,8 @@ EMAIL = "ezra@engineyard.com"
 HOMEPAGE = "http://github.com/ezmobius/nanite"
 SUMMARY = "self assembling fabric of ruby daemons"
 
+Dir.glob('tasks/*.rake').each { |r| Rake.application.add_import r }
+
 spec = Gem::Specification.new do |s|
   s.name = GEM
   s.version = ::VER
@@ -25,10 +27,9 @@ spec = Gem::Specification.new do |s|
   s.executables  = %w( nanite nanite-mapper nanite-admin )
 
   s.add_dependency "extlib"
-  s.add_dependency "amqp"
+  s.add_dependency('amqp', '>= 0.6.0')
 
   s.require_path = 'lib'
-  #s.autorequire = GEM
   s.files = %w(LICENSE README.rdoc Rakefile TODO) + Dir.glob("{lib,bin,specs}/**/*")
 end
 

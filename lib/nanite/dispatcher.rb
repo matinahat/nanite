@@ -4,7 +4,7 @@ module Nanite
   # in Rails and Merb handle HTTP requests.
   #
   # Dispatcher gathers provided services from actors running on the node
-  # and has the list around so the can be advertised to mapper.
+  # and has the list around so they can be advertised to mapper.
   #
   # Dispatcher directly sends work requests and sends replies back to request
   # sender's queue.
@@ -21,6 +21,7 @@ module Nanite
 
     def register(actor_instance, prefix = nil)
       raise ArgumentError, "#{actor_instance.inspect} is not a Nanite::Actor subclass instance" unless Nanite::Actor === actor_instance
+      @agent.log.info "Registering #{actor_instance.inspect} with prefix #{prefix.inspect}"
       prefix ||= actor_instance.class.default_prefix
       @actors[prefix.to_s] = actor_instance
     end
@@ -45,7 +46,7 @@ module Nanite
       _, prefix, meth = req.type.split('/')
       begin
         actor = @actors[prefix]
-        res = actor.send(meth, req.payload)
+        res = actor.send((meth.nil? ? "index" : meth), req.payload)
       rescue Exception => e
         res = "#{e.class.name}: #{e.message}\n  #{e.backtrace.join("\n  ")}"
       end

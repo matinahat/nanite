@@ -1,3 +1,5 @@
+require 'yaml'
+
 module Nanite
   class Agent
     attr_reader :identity, :format, :status_proc, :results, :root, :log_dir, :vhost, :file_root, :files, :host
@@ -39,13 +41,14 @@ module Nanite
     # Nanite looks for actors under app_root/actors directory.
     def load_actors
       return unless root
-      if File.exist?(root / 'init.rb')
-        instance_eval(File.read(root / 'init.rb'), root / 'init.rb')
-      end
 
       Dir["#{root}/actors/*.rb"].each do |actor|
         log.info "loading actor: #{actor}"
         require actor
+      end
+
+      if File.exist?(root / 'init.rb')
+        instance_eval(File.read(root / 'init.rb'), root / 'init.rb')
       end
     end
 
@@ -105,7 +108,7 @@ module Nanite
     # 5. Sets up periodic timer for heartbeat notifications.
     # 6. If :console option is given, starts a console.
     # 7. If :daemonize option is given, agent daemonizes.
-    # 
+    #
     # Mapper listens to exclusive queue (only one consumer allowed) that has
     # name of agent identity.
     #
@@ -126,11 +129,11 @@ module Nanite
         log.debug "starting nanite"
         load_actors
         advertise_services
-  
+
         EM.add_periodic_timer(ping_time) do
           send_ping
         end
-        
+
         amq.queue(identity, :exclusive => true).subscribe{ |msg|
           if opts[:threaded_actors]
             Thread.new(msg) do |msg_in_thread|
@@ -141,8 +144,12 @@ module Nanite
           end
         }
       end
-      
+
       start_console if opts[:console] && !opts[:daemonize]
+    end
+
+    def register(actor_instance, prefix = nil)
+      dispatcher.register(actor_instance, prefix)
     end
 
     # Updates last ping time
@@ -163,8 +170,8 @@ module Nanite
     end
 
     # A callable object that calculates load of this agent.
-    # Default proc shells out to uptime and parser the output
-    # to get LA values.
+    # Default proc shells out to uptime and parses the output
+    # to get load average values.
     def status_proc
       @status_proc ||= lambda{ parse_uptime(`uptime`) rescue "no status"}
     end
