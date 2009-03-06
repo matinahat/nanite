@@ -1,75 +1,58 @@
 module Nanite
-  # Dispatcher handles incoming messages and passes them
-  # over to actors that handle them pretty much like controllers
-  # in Rails and Merb handle HTTP requests.
-  #
-  # Dispatcher gathers provided services from actors running on the node
-  # and has the list around so they can be advertised to mapper.
-  #
-  # Dispatcher directly sends work requests and sends replies back to request
-  # sender's queue.
-  #
-  # Dispatcher works together with agent itself and reducer to do actual work
-  # once packet type is determined and needs to be processed.
   class Dispatcher
-    def initialize(agent)
-      @agent = agent
-      @actors = {}
+    attr_reader :registry, :serializer, :identity, :amq, :options
+
+    def initialize(amq, registry, serializer, identity, options)
+      @amq = amq
+      @registry = registry
+      @serializer = serializer
+      @identity = identity
+      @options = options
     end
 
-    attr_reader :agent, :actors
-
-    def register(actor_instance, prefix = nil)
-      raise ArgumentError, "#{actor_instance.inspect} is not a Nanite::Actor subclass instance" unless Nanite::Actor === actor_instance
-      @agent.log.info "Registering #{actor_instance.inspect} with prefix #{prefix.inspect}"
-      prefix ||= actor_instance.class.default_prefix
-      @actors[prefix.to_s] = actor_instance
-    end
-
-    def all_services
-      @actors.map {|prefix,actor| actor.class.provides_for(prefix) }.flatten.uniq
-    end
-
-    # When work request is received from a mapper, dispatcher picks an
-    # actor and calls method on it passing it a payload.
-    #
-    # Result is sent back to the requesting node.
-    def dispatch_request(req)
-      # /calculator/add
-      #
-      # gets split into nil, calculator as prefix and add as method name
-      # that is called on actor instance
-      #
-      # TODO: how about /math/calculator/add and handling namespaced
-      #       actors or methods with / in them? It may be an issue for a larger
-      #       nanites cluster :/
-      _, prefix, meth = req.type.split('/')
-      begin
-        actor = @actors[prefix]
-        res = actor.send((meth.nil? ? "index" : meth), req.payload)
+    def dispatch(deliverable)
+      result = begin
+        prefix, meth = deliverable.type.split('/')[1..-1]
+        actor = registry.actor_for(prefix)
+        actor.send(meth, deliverable.payload)
       rescue Exception => e
-        res = "#{e.class.name}: #{e.message}\n  #{e.backtrace.join("\n  ")}"
+        handle_exception(actor, meth, deliverable, e)
       end
-      Result.new(req.token, req.reply_to, res, agent.identity) if req.reply_to
+
+      if deliverable.kind_of?(Request)
+        result = Result.new(deliverable.token, deliverable.reply_to, result, identity)
+        amq.queue(deliverable.reply_to, :no_declare => options[:secure]).publish(serializer.dump(result))
+      end
+
+      result
     end
 
-    def handle(packet)
-      case packet
-      when Pong
-        agent.log.debug "handling Pong: #{packet}"
-        agent.pinged!
-      when Advertise
-        agent.log.debug "handling Advertise: #{packet}"
-        agent.pinged!
-        agent.advertise_services
-      when Request
-        agent.log.debug "handling Request: #{packet}"
-        result = dispatch_request(packet)
-        agent.amq.queue(packet.reply_to).publish(agent.dump_packet(result)) if packet.reply_to
-      when Result
-        agent.log.debug "handling Result: #{packet}"
-        agent.reducer.handle_result(packet)
+    private
+
+    def describe_error(e)
+      "#{e.class.name}: #{e.message}\n #{e.backtrace.join("\n  ")}"
+    end
+
+    def handle_exception(actor, meth, deliverable, e)
+      error = describe_error(e)
+      Nanite::Log.error(error)
+      begin
+        if actor.class.instance_exception_callback
+          case actor.class.instance_exception_callback
+          when Symbol, String
+            actor.send(actor.class.instance_exception_callback, meth.to_sym, deliverable, e)
+          when Proc
+            actor.instance_exec(meth.to_sym, deliverable, e, &actor.class.instance_exception_callback)
+          end
+        end
+        if Nanite::Actor.superclass_exception_callback
+          Nanite::Actor.superclass_exception_callback.call(actor, meth.to_sym, deliverable, e)
+        end
+      rescue Exception => e1
+        error = describe_error(e1)
+        Nanite::Log.error(error)
       end
+      error
     end
   end
 end

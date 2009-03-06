@@ -18,12 +18,9 @@ require File.dirname(__FILE__) + '/../lib/nanite'
 # those agents and their methods.  When this process is presumed complete after
 # 16 seconds we can finally send the nanite agent the task to execute.
 
-
-EM.run {
+EM.run do
   # start up a new mapper with a ping time of 15 seconds
-  Nanite.start :mapper => true, :host => 'localhost',
-               :user => 'mapper', :pass => 'testing',
-               :vhost => '/nanite', :log_level => 'info'
+  Nanite.start_mapper(:host => 'localhost', :user => 'mapper', :pass => 'testing', :vhost => '/nanite', :log_level => 'info')
 
   # have this run after 16 seconds so we can be pretty sure that the mapper
   # has already received pings from running nanites and registered them.
@@ -34,5 +31,5 @@ EM.run {
       EM.stop_event_loop
     end
   end
-}
+end
 

@@ -1,66 +1,7 @@
 module Nanite
-  class Agent
-    # Assigns a mapper to this agent.
-    #
-    # @api :public:
-    def mapper=(map)
-      @mapper = map
-    end
-
-    # Returns a mapper associated with this agent.
-    #
-    # @api :public:
-    def mapper
-      @mapper ||= Mapper.new(self)
-    end
-
-    # Make a nanite request which expects a response.
-    #
-    # ==== Parameters
-    # type<String>:: The dispatch route for the request
-    # payload<Object>:: Payload to send.  This will get marshalled en route
-    #
-    # ==== Options
-    # :selector<Symbol>:: Method for selecting an actor.  Default is :least_loaded.
-    #   :least_loaded:: Pick the nanite which has the lowest load.
-    #   :all:: Send the request to all nanites which respond to the service.
-    #   :random:: Randomly pick a nanite.
-    #   :rr: Select a nanite according to round robin ordering.
-    # :timeout<Numeric>:: The timeout in seconds before giving up on a response.
-    #   Defaults to 60.
-    # :target<String>:: Select a specific nanite via identity, rather than using
-    #   a selector.
-    #
-    # ==== Block Parameters
-    # :results<Object>:: The returned value from the nanite actor.
-    #
-    # @api :public:
-    def request(type, payload="", opts = {}, &blk)
-      mapper.request(type, payload, opts,  &blk)
-    end
-
-    # Make a nanite request which does not expect a response.
-    #
-    # ==== Parameters
-    # type<String>:: The dispatch route for the request
-    # payload<Object>:: Payload to send.  This will get marshalled en route
-    #
-    # ==== Options
-    # :selector<Symbol>:: Method for selecting an actor.  Default is :least_loaded.
-    #   :least_loaded:: Pick the nanite which has the lowest load.
-    #   :all:: Send the request to all nanites which respond to the service.
-    #   :random:: Randomly pick a nanite.
-    #   :rr: Select a nanite according to round robin ordering.
-    #
-    # @api :public:
-    def push(type, payload="", opts = {})
-      mapper.push(type, payload, opts)
-    end
-  end
-
   # Mappers are control nodes in nanite clusters. Nanite clusters
   # can follow peer-to-peer model of communication as well as client-server,
-  # and mappers are nodes that know who to send work requests to.
+  # and mappers are nodes that know who to send work requests to agents.
   #
   # Mappers can reside inside a front end web application written in Merb/Rails
   # and distribute heavy lifting to actors that register with the mapper as soon
@@ -75,111 +16,171 @@ module Nanite
   #
   # This makes Nanite clusters self-healing and immune to individual node
   # failures.
-  #
-  # Nanites known to mapper are stored in a hash, where keys are nanite
-  # identities (that you specify using the :identity option), and whose value
-  # is a hash consisting of the triple representing timestamps/status/services.
   class Mapper
-    attr_reader :agent, :nanites, :timeouts
+    include AMQPHelper
+    include ConsoleHelper
+    include DaemonizeHelper
 
-    # Initializes mapper from agent instance.
-    #
-    # Initially nanites list is empty, and gets populated
-    # as agents in the nanite cluster go online and advertise
-    # their services.
-    def initialize(agent)
-      @identity = Nanite.gensym
-      @agent = agent
-      @nanites = {}
-    end
+    attr_reader :cluster, :identity, :job_warden, :options, :serializer, :amq
 
-    # Starts mapper operations. On start mapper sets up the following
-    # queues with the AMQP broker:
+    DEFAULT_OPTIONS = COMMON_DEFAULT_OPTIONS.merge({:user => 'mapper', :identity => Identity.generate, :agent_timeout => 15,
+      :offline_redelivery_frequency => 10, :persistent => false, :offline_failsafe => false}) unless defined?(DEFAULT_OPTIONS)
+
+    # Initializes a new mapper and establishes
+    # AMQP connection. This must be used inside EM.run block or if EventMachine reactor
+    # is already started, for instance, by a Thin server that your Merb/Rails
+    # application runs on.
     #
-    # heartbeat#{identity} for heartbeat notifications
-    # mapper#{identity} for registration notifications
-    # identity value is used for messages queue (work requests queue) name
+    # Mapper options:
     #
-    # Mapper tracks request timeouts in timeouts hash and when a request times out
-    # the request token and a callback for it are deleted.
+    # identity    : identity of this mapper, may be any string
+    #
+    # format      : format to use for packets serialization. Can be :marshal, :json or :yaml.
+    #               Defaults to Ruby's Marshall format. For interoperability with
+    #               AMQP clients implemented in other languages, use JSON.
+    #
+    #               Note that Nanite uses JSON gem,
+    #               and ActiveSupport's JSON encoder may cause clashes
+    #               if ActiveSupport is loaded after JSON gem.
+    #
+    # log_level   : the verbosity of logging, can be debug, info, warn, error or fatal.
+    #
+    # agent_timeout   : how long to wait before an agent is considered to be offline
+    #                   and thus removed from the list of available agents.
+    #
+    # log_dir    : log file path, defaults to the current working directory.
+    #
+    # console     : true tells mapper to start interactive console
+    #
+    # daemonize   : true tells mapper to daemonize
+    #
+    # offline_redelivery_frequency : The frequency in seconds that messages stored in the offline queue will be retrieved
+    #                                for attempted redelivery to the nanites. Default is 10 seconds.
+    #
+    # persistent  : true instructs the AMQP broker to save messages to persistent storage so that they aren't lost when the
+    #               broker is restarted. Default is false. Can be overriden on a per-message basis using the request and push methods.
+    # 
+    # secure      : use Security features of rabbitmq to restrict nanites to themselves
+    #
+    # Connection options:
+    #
+    # vhost    : AMQP broker vhost that should be used
+    #
+    # user     : AMQP broker user
+    #
+    # pass     : AMQP broker password
+    #
+    # host     : host AMQP broker (or node of interest) runs on,
+    #            defaults to 0.0.0.0
+    #
+    # port     : port AMQP broker (or node of interest) runs on,
+    #            this defaults to 5672, port used by some widely
+    #            used AMQP brokers (RabbitMQ and ZeroMQ)
     #
     # @api :public:
-    def start
-      @timeouts = {}
-      setup_queues
-      agent.log.info "starting mapper with nanites(#{@nanites.keys.size}):\n#{@nanites.keys.join(',')}"
-      EM.add_periodic_timer(agent.ping_time) do
-        check_pings
-        EM.next_tick { check_timeouts }
-      end
+    def self.start(options = {})
+      new(options)
     end
 
-    # Message queue instance used for communication.
-    # You are likely to not need direct access to AMQP
-    # exchanges/queues, so this method is a part of plugin
-    # API.
-    # For documentation, see AMQP::MQ in amqp gem rdoc.
-    #
-    # @api :plugin:
-    def amq
-      @amq ||= MQ.new
-    end
-
-    # select nanite name/state pairs for those given block
-    # returns true
-    #
-    # used by selectors specified to request messages
-    #
-    # @api :plugin:
-    def select_nanites
-      names = []
-      @nanites.each do |name, state|
-        names << [name, state] if yield(name, state)
-      end
-      names
-    end
-
-    # Assembles and routes a request packet to nanites
-    # that satisfy given selector. Registers a callback
-    # since this method assumes, you want to get results back.
-    #
-    # See Nanite::Mapper#request documentation for details
-    # and available options.
-    #
-    # @api :plugin:
-    def request(type, payload="", opts = {}, &blk)
-      defaults = {:selector => :least_loaded, :timeout => 60}
-      opts = defaults.merge(opts)
-      req = Request.new(type, payload, agent.identity)
-      req.token = Nanite.gensym
-      req.reply_to = agent.identity
-      answer = nil
-      if target = opts[:target]
-        answer = route_specific(req, target)
+    def initialize(options)
+      @options = DEFAULT_OPTIONS.clone.merge(options)
+      root = options[:root] || @options[:root]
+      custom_config = if root
+        file = File.expand_path(File.join(root, 'config.yml'))
+        File.exists?(file) ? (YAML.load(IO.read(file)) || {}) : {}
       else
-        answer = route(req, opts[:selector])
+        {}
       end
-      return false unless answer
-      agent.callbacks[answer.token] = blk if blk
-      agent.reducer.watch_for(answer)
-      @timeouts[answer.token] = (Time.now + (opts[:timeout] || 60) ) if opts[:timeout]
-      answer.token
+      options.delete(:identity) unless options[:identity]
+      @options.update(custom_config.merge(options))
+      @identity = "mapper-#{@options[:identity]}"
+      @options[:file_root] ||= File.join(@options[:root], 'files')
+      log_path = false
+      if @options[:daemonize]
+        log_path = (@options[:log_dir] || @options[:root] || Dir.pwd)
+      end
+      Log.init(@identity, log_path)
+      Log.log_level = @options[:log_level]
+      @serializer = Serializer.new(@options[:format])
+      daemonize if @options[:daemonize]
+      @amq = start_amqp(@options)
+      @cluster = Cluster.new(@amq, @options[:agent_timeout], @options[:identity], @serializer)
+      @job_warden = JobWarden.new(@serializer)
+      Nanite::Log.info('starting mapper')
+      setup_queues
+      start_console if @options[:console] && !@options[:daemonize]
     end
 
-    # Assembles and routes a request packet to nanites
-    # that satisfy given selector. Registers a callback
-    # since this method assumes, you want to get results back.
+    # Make a nanite request which expects a response.
     #
-    # See Nanite::Mapper#push documentation for details
-    # and available options.
+    # ==== Parameters
+    # type<String>:: The dispatch route for the request
+    # payload<Object>:: Payload to send.  This will get marshalled en route
     #
-    # @api :plugin:
-    def push(type, payload="", opts = {:selector => :least_loaded, :timeout => 60})
-      req = Request.new(type, payload, agent.identity)
-      req.token = Nanite.gensym
-      req.reply_to = nil
-      if answer = route(req, opts[:selector])
+    # ==== Options
+    # :selector<Symbol>:: Method for selecting an actor.  Default is :least_loaded.
+    #   :least_loaded:: Pick the nanite which has the lowest load.
+    #   :all:: Send the request to all nanites which respond to the service.
+    #   :random:: Randomly pick a nanite.
+    #   :rr: Select a nanite according to round robin ordering.
+    # :target<String>:: Select a specific nanite via identity, rather than using
+    #   a selector.
+    # :offline_failsafe<Boolean>:: Store messages in an offline queue when all
+    #   the nanites are offline. Messages will be redelivered when nanites come online.
+    #   Default is false unless the mapper was started with the --offline-failsafe flag.
+    # :persistent<Boolean>:: Instructs the AMQP broker to save the message to persistent
+    #   storage so that it isnt lost when the broker is restarted.
+    #   Default is false unless the mapper was started with the --persistent flag.
+    #
+    # ==== Block Parameters
+    # :results<Object>:: The returned value from the nanite actor.
+    #
+    # @api :public:
+    def request(type, payload = '', opts = {}, &blk)
+      request = build_deliverable(Request, type, payload, opts)
+      request.reply_to = identity
+      targets = cluster.targets_for(request)
+      if !targets.empty?
+        job = job_warden.new_job(request, targets, blk)
+        cluster.route(request, job.targets)
+        job
+      elsif opts.key?(:offline_failsafe) ? opts[:offline_failsafe] : options[:offline_failsafe]
+        cluster.publish(request, 'mapper-offline')
+        :offline
+      else
+        false
+      end
+    end
+
+    # Make a nanite request which does not expect a response.
+    #
+    # ==== Parameters
+    # type<String>:: The dispatch route for the request
+    # payload<Object>:: Payload to send.  This will get marshalled en route
+    #
+    # ==== Options
+    # :selector<Symbol>:: Method for selecting an actor.  Default is :least_loaded.
+    #   :least_loaded:: Pick the nanite which has the lowest load.
+    #   :all:: Send the request to all nanites which respond to the service.
+    #   :random:: Randomly pick a nanite.
+    #   :rr: Select a nanite according to round robin ordering.
+    # :offline_failsafe<Boolean>:: Store messages in an offline queue when all
+    #   the nanites are offline. Messages will be redelivered when nanites come online.
+    #   Default is false unless the mapper was started with the --offline-failsafe flag.
+    # :persistent<Boolean>:: Instructs the AMQP broker to save the message to persistent
+    #   storage so that it isnt lost when the broker is restarted.
+    #   Default is false unless the mapper was started with the --persistent flag.
+    #
+    # @api :public:
+    def push(type, payload = '', opts = {})
+      push = build_deliverable(Push, type, payload, opts)
+      targets = cluster.targets_for(push)
+      if !targets.empty?
+        cluster.route(push, targets)
         true
+      elsif opts.key?(:offline_failsafe) ? opts[:offline_failsafe] : options[:offline_failsafe]
+        cluster.publish(push, 'mapper-offline')
+        :offline
       else
         false
       end
@@ -187,146 +188,41 @@ module Nanite
 
     private
 
+    def build_deliverable(deliverable_type, type, payload, opts)
+      deliverable = deliverable_type.new(type, payload, opts)
+      deliverable.from = identity
+      deliverable.token = Identity.generate
+      deliverable.persistent = opts.key?(:persistent) ? opts[:persistent] : options[:persistent]
+      deliverable
+    end
+
     def setup_queues
-      agent.log.debug "setting up queues"
-      amq.queue("heartbeat#{@identity}", :exclusive => true).bind(amq.fanout('heartbeat')).subscribe{ |ping|
-        agent.log.debug "Got heartbeat"
-        handle_ping(agent.load_packet(ping))
-      }
-      amq.queue("mapper#{@identity}", :exclusive => true).bind(amq.fanout('registration')).subscribe{ |msg|
-        agent.log.debug "Got registration"
-        register(agent.load_packet(msg))
-      }
-      amq.queue(agent.identity, :exclusive => true).subscribe{ |msg|
-        msg = agent.load_packet(msg)
-        agent.log.debug "Got a message: #{msg.inspect}"
-        agent.reducer.handle_result(msg)
-      }
+      setup_offline_queue
+      setup_message_queue
     end
 
-    # updates nanite information (last ping timestamps, status)
-    # when heartbeat message is received
-    def handle_ping(ping)
-      # from is Nanite's identity, see
-      # Ping packet implementation in packets.rb
-      if nanite = @nanites[ping.from]
-        nanite[:timestamp] = Time.now
-        nanite[:status] = ping.status
-        amq.queue(ping.identity).publish(agent.dump_packet(Pong.new))
-      else
-        amq.queue(ping.identity).publish(agent.dump_packet(Advertise.new))
-      end
-    end
-
-    # checks for nanites that timed out their heartbeat
-    # notifications, and removes them from the list of
-    # available workers
-    def check_pings
-      time = Time.now
-      @nanites.each do |name, state|
-        if (time - state[:timestamp]) > agent.ping_time + 1
-          @nanites.delete(name)
-          agent.log.info "removed #{name} from mapping/registration"
-        end
-      end
-    end
-
-    # adds nanite to nanites map: key is nanite's identity
-    # and value is a timestamp/services/status triple implemented
-    # as a hash
-    def register(reg)
-      @nanites[reg.identity] = {:timestamp => Time.now,
-        :services => reg.services,
-        :status    => reg.status}
-      agent.log.info "registered: #{reg.identity}, #{@nanites[reg.identity]}"
-    end
-
-    # returns least loaded nanite that provides given service
-    def least_loaded(res)
-      candidates = select_nanites { |n,r| r[:services].include?(res) }
-      return [] if candidates.empty?
-
-      [candidates.min { |a,b|  a[1][:status] <=> b[1][:status] }]
-    end
-
-    # returns all nanites that provide given service
-    def all(res)
-      select_nanites { |n,r| r[:services].include?(res) }
-    end
-
-    def random(res)
-      candidates = select_nanites { |n,r| r[:services].include?(res) }
-      return [] if candidates.empty?
-
-      [candidates[rand(candidates.size)]]
-    end
-
-    # selects next nanite that provides given resource
-    # using round robin rotation
-    def rr(res)
-      @last ||= {}
-      @last[res] ||= 0
-      candidates = select_nanites { |n,r| r[:services].include?(res) }
-      return [] if candidates.empty?
-      @last[res] = 0 if @last[res] >= candidates.size
-      candidate = candidates[@last[res]]
-      @last[res] += 1
-      [candidate]
-    end
-
-    # checks pending requests for expiration and removes
-    # those that timed out
-    def check_timeouts
-      time = Time.now
-      @timeouts.each do |tok, timeout|
-        if time > timeout
-          timeout = @timeouts.delete(tok)
-          agent.log.info "request timeout: #{tok}"
-          callback = agent.callbacks.delete(tok)
-          callback.call(nil) if callback
-        end
-      end
-    end
-
-    # unicast routing method
-    def route_specific(req, target)
-      if @nanites[target]
-        answer = Answer.new(agent,req.token)
-        answer.workers = [target]
-
-        EM.next_tick {
-          send_request(req, target)
-        }
-        answer
-      else
-        nil
-      end
-    end
-
-    # multicast routing method
-    def route(req, selector)
-      targets = __send__(selector, req.type)
-      unless targets.empty?
-        answer = Answer.new(agent, req.token)
-
-        workers = targets.map{|t| t.first }
-
-        answer.workers = Hash[*workers.zip(Array.new(workers.size, :waiting)).flatten]
-
-        EM.next_tick {
-          workers.each do |worker|
-            send_request(req, worker)
+    def setup_offline_queue
+      offline_queue = amq.queue('mapper-offline', :durable => true)
+      offline_queue.subscribe(:ack => true) do |info, deliverable|
+        deliverable = serializer.load(deliverable)
+        targets = cluster.targets_for(deliverable)
+        unless targets.empty?
+          info.ack
+          if deliverable.kind_of?(Request)
+            deliverable.reply_to = identity
+            job_warden.new_job(deliverable, targets)
           end
-        }
-        answer
-      else
-        nil
+          cluster.route(deliverable, targets)
+        end
       end
+
+      EM.add_periodic_timer(options[:offline_redelivery_frequency]) { offline_queue.recover }
     end
 
-    # dumps packet and passes it to the "transport layer"
-    def send_request(req, target)
-      amq.queue(target).publish(agent.dump_packet(req))
+    def setup_message_queue
+      amq.queue(identity, :exclusive => true).bind(amq.fanout(identity)).subscribe do |msg|
+        job_warden.process(msg)
+      end
     end
   end
 end

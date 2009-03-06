@@ -1,15 +1,12 @@
 require 'rack'
-require 'nanite/mapper'
 
 module Nanite
-
   # This is a Rack app for nanite-admin.  You need to have an async capable
   # version of Thin installed for this to work.  See bin/nanite-admin for install
   # instructions.
   class Admin
-
-    def initialize(agent)
-      @agent = agent
+    def initialize(mapper)
+      @mapper = mapper
     end
 
     AsyncResponse = [-1, {}, []].freeze
@@ -17,12 +14,19 @@ module Nanite
     def call(env)
       req = Rack::Request.new(env)
       if cmd = req.params['command']
-        Nanite.request(cmd, req.params['payload'], :selector => req.params['type'], :timeout => 15) do |response|
-          if response
-            env['async.callback'].call [200, {'Content-Type' => 'text/html'}, [layout(ul(response))]]
-          else
-            env['async.callback'].call [500, {'Content-Type' => 'text/html'}, [layout("Request Timeout")]]
-          end
+        @command = cmd
+        @selection = req.params['type'] if req.params['type']
+        
+        options = {}
+        case @selection
+        when 'least_loaded', 'random', 'all', 'rr'
+          options[:selector] = @selection
+        else
+          options[:target] = @selection
+        end
+
+        @mapper.request(cmd, req.params['payload'], options) do |response|
+          env['async.callback'].call [200, {'Content-Type' => 'text/html'}, [layout(ul(response))]]
         end
         AsyncResponse
       else
@@ -32,8 +36,8 @@ module Nanite
 
     def services
       buf = "<select name='command'>"
-      @agent.mapper.nanites.map{|k,v| v[:services]}.flatten.uniq.each do |srv|
-        buf << "<option value='#{srv}'>#{srv}</option>"
+      @mapper.cluster.nanites.map{|n,s| s[:services] }.flatten.each do |srv|
+        buf << "<option value='#{srv}' #{@command == srv ? 'selected="true"' : ''}>#{srv}</option>"
       end
       buf << "</select>"
       buf
@@ -42,13 +46,13 @@ module Nanite
     def ul(hash)
       buf = "<ul>"
       hash.each do |k,v|
-        buf << "<li>identity : #{k}<br />response : #{v.inspect}</li>"
+        buf << "<li><div class=\"nanite\">#{k}:</div><div class=\"response\">#{v.inspect}</div></li>"
       end
       buf << "</ul>"
       buf
     end
 
-    def layout(content="")
+    def layout(content=nil)
       %Q{
         <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
         <html xmlns='http://www.w3.org/1999/xhtml'>
@@ -74,28 +78,40 @@ module Nanite
             </script>
 
             <style>
-              body {margin: 1em 3em 1em 3em;}
-              li {list-style-type: none; margin-bottom: 1em;}
+              body {margin: 0; font-family: verdana; background-color: #fcfcfc;}
+              ul {margin: 0; padding: 0; margin-left: 10px}
+              li {list-style-type: none; margin-bottom: 6px}
+              li .nanite {font-weight: bold; font-size: 12px}
+              li .response {padding: 8px}
+              h1, h2, h3 {margin-top: none; padding: none; margin-left: 40px;}
+              h1 {font-size: 22px; margin-top: 40px; margin-bottom: 30px; border-bottom: 1px solid #ddd; padding-bottom: 6px;
+                margin-right: 40px}
+              h2 {font-size: 16px;}
+              h3 {margin-left: 0; font-size: 14px}
+              .section {border: 1px solid #ccc; background-color: #fefefe; padding: 10px; margin: 20px 40px; padding: 20px;
+                font-size: 14px}
+              #footer {text-align: center; color: #AAA; font-size: 12px}
             </style>
 
           </head>
 
           <body>
-
             <div id="header">
-              <h2>Nanite Control Tower</h2>
+              <h1>Nanite Control Tower</h1>
             </div>
 
-            <div id="content">
+            <h2>#{@mapper.options[:vhost]}</h2>
+            <div class="section">
               <form method="post" action="/">
                 <input type="hidden" value="POST" name="_method"/>
 
                   <label>Send</label>
                   <select name="type">
-                    <option value="least_loaded">the least loaded nanite</option>
-                    <option value="random">a random nanite</option>
-                    <option value="all">all nanites</option>
-                    <option value="rr">a nanite chosen by round robin</option>
+                    <option #{@selection == 'least_loaded' ? 'selected="true"' : ''} value="least_loaded">the least loaded nanite</option>
+                    <option #{@selection == 'random' ? 'selected="true"' : ''} value="random">a random nanite</option>
+                    <option #{@selection == 'all' ? 'selected="true"' : ''} value="all">all nanites</option>
+                    <option #{@selection == 'rr' ? 'selected="true"' : ''} value="rr">a nanite chosen by round robin</option>
+                    #{@mapper.cluster.nanites.map {|k,v| "<option #{@selection == k ? 'selected="true"' : ''} value='#{k}'>#{k}</option>" }.join}
                   </select>
 
                   <label>providing service</label>
@@ -107,18 +123,25 @@ module Nanite
                   <input type="submit" class="submit" value="Go!" name="submit"/>
               </form>
 
-              <h2>nanite responses:</h2>
+              #{"<h3>Responses</h3>" if content}
               #{content}
-
-              <h2>running nanites:</h2>
-              <ul>
-                #{@agent.mapper.nanites.map {|k,v| "<li>identity : #{k}<br />load : #{v[:status]}<br />services : #{v[:services].inspect}</li>" }.join}
-              </ul>
             </div>
 
+            <h2>Running nanites</h2>
+            <div class="section">
+              #{"No nanites online." if @mapper.cluster.nanites.size == 0}
+              <ul>
+                #{@mapper.cluster.nanites.map {|k,v| "<li>identity : #{k}<br />load : #{v[:status]}<br />services : #{v[:services].inspect}</li>" }.join}
+              </ul>
+            </div>
+            <div id="footer">
+              Nanite #{Nanite::VERSION}
+              <br />
+              &copy; 2009 a bunch of random geeks
+            </div>
           </body>
         </html>
       }
-    end # layout
-  end # class Admin
-end # module Nanite
+    end
+  end
+end
