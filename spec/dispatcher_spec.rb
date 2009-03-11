@@ -47,12 +47,11 @@ end
 
 describe "Nanite::Dispatcher" do
   before(:each) do
-    log = mock('log', :info => nil, :error => nil)
     amq = mock('amq', :queue => mock('queue', :publish => nil))
     @actor = Foo.new
-    @registry = Nanite::ActorRegistry.new(log)
+    @registry = Nanite::ActorRegistry.new
     @registry.register(@actor, nil)
-    @dispatcher = Nanite::Dispatcher.new(amq, @registry, Nanite::Serializer.new(:marshal), '0xfunkymonkey', log, {})
+    @dispatcher = Nanite::Dispatcher.new(amq, @registry, Nanite::Serializer.new(:marshal), '0xfunkymonkey', {})
   end
 
   it "should dispatch a request" do
@@ -63,6 +62,14 @@ describe "Nanite::Dispatcher" do
     res.results.should == ['hello', 'you']
   end
 
+  it "should dispatch a request to the default action" do
+    req = Nanite::Request.new('/foo', 'you')
+    res = @dispatcher.dispatch(req)
+    res.should(be_kind_of(Nanite::Result))
+    res.token.should == req.token
+    res.results.should == ['hello', 'you']
+  end
+  
   it "should handle custom prefixes" do
     @registry.register(Foo.new, 'umbongo')
     req = Nanite::Request.new('/umbongo/bar', 'you')

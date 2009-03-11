@@ -59,16 +59,24 @@ module Nanite
         options[:secure] = true
       end
 
-      opts.on("-f", "--format FORMAT", "The serialization type to use for transfering data. Can be marshal, json or yaml. Default is marshal") do |json|
-        options[:format] = :json
+      opts.on("-f", "--format FORMAT", "The serialization type to use for transfering data. Can be marshal, json or yaml. Default is marshal") do |fmt|
+        options[:format] = fmt
       end
 
       opts.on("-d", "--daemonize", "Run #{type} as a daemon") do |d|
         options[:daemonize] = true
       end
+      
+      opts.on("--pid-dir PATH", "Specify the pid path, only used with daemonize") do |dir|
+        options[:pid_dir] = dir
+      end
 
       opts.on("-l", "--log-level LEVEL", "Specify the log level (fatal, error, warn, info, debug). Default is info") do |level|
         options[:log_level] = level
+      end
+      
+      opts.on("--log-dir PATH", "Specify the log path") do |dir|
+        options[:log_dir] = dir
       end
 
       opts.on("--version", "Show the nanite version number") do |res|
