@@ -71,7 +71,7 @@ module Nanite
   # target   is the target nanite for the request
   # persistent signifies if this request should be saved to persistent storage by the AMQP broker
   class Request < Packet
-    attr_accessor :from, :payload, :type, :token, :reply_to, :selector, :target, :persistent
+    attr_accessor :from, :payload, :type, :token, :reply_to, :selector, :target, :persistent, :tags
     DEFAULT_OPTIONS = {:selector => :least_loaded}
     def initialize(type, payload, opts={})
       opts = DEFAULT_OPTIONS.merge(opts)
@@ -83,11 +83,12 @@ module Nanite
       @selector         = opts[:selector]
       @target           = opts[:target]
       @persistent       = opts[:persistent]
+      @tags             = opts[:tags] || []
     end
     def self.json_create(o)
       i = o['data']
       new(i['type'], i['payload'], {:from => i['from'], :token => i['token'], :reply_to => i['reply_to'], :selector => i['selector'],
-        :target => i['target'], :persistent => i['persistent']})
+      :target => i['target'], :persistent => i['persistent'], :tags => i['tags']})
     end
   end
 
@@ -104,7 +105,7 @@ module Nanite
   # target   is the target nanite for the request
   # persistent signifies if this request should be saved to persistent storage by the AMQP broker
   class Push < Packet
-    attr_accessor :from, :payload, :type, :token, :selector, :target, :persistent
+    attr_accessor :from, :payload, :type, :token, :selector, :target, :persistent, :tags
     DEFAULT_OPTIONS = {:selector => :least_loaded}
     def initialize(type, payload, opts={})
       opts = DEFAULT_OPTIONS.merge(opts)
@@ -115,11 +116,12 @@ module Nanite
       @selector         = opts[:selector]
       @target           = opts[:target]
       @persistent       = opts[:persistent]
+      @tags             = opts[:tags] || []
     end
     def self.json_create(o)
       i = o['data']
       new(i['type'], i['payload'], {:from => i['from'], :token => i['token'], :selector => i['selector'],
-        :target => i['target'], :persistent => i['persistent']})
+      :target => i['target'], :persistent => i['persistent'], :tags => i['tags']})
     end
   end
 
@@ -143,6 +145,28 @@ module Nanite
     end
   end
 
+  # packet that means an intermediate status notification sent from actor to mapper. is appended to a list of messages matching messagekey.
+  #
+  # from     is sender identity
+  # messagekey is a string that can become part of a redis key, which identifies the name under which the message is stored
+  # message  is arbitrary data that is transferred from actor, an intermediate result of actor's work
+  # token    is a generated request id that mapper uses to identify replies
+  # to       is identity of the node result should be delivered to
+  class IntermediateMessage < Packet
+    attr_accessor :token, :messagekey, :message, :to, :from
+    def initialize(token, to, from, messagekey, message)
+      @token = token
+      @to = to
+      @from = from
+      @messagekey = messagekey
+      @message = message
+    end
+    def self.json_create(o)
+      i = o['data']
+      new(i['token'], i['to'], i['from'], i['messagekey'], i['message'])
+    end
+  end
+
   # packet that means an availability notification sent from actor to mapper
   #
   # from     is sender identity
@@ -150,15 +174,30 @@ module Nanite
   # status   is a load of the node by default, but may be any criteria
   #          agent may use to report it's availability, load, etc
   class Register < Packet
-    attr_accessor :identity, :services, :status
-    def initialize(identity, services, status)
+    attr_accessor :identity, :services, :status, :tags
+    def initialize(identity, services, status, tags)
       @status = status
+      @tags = tags
       @identity = identity
       @services = services
     end
     def self.json_create(o)
       i = o['data']
-      new(i['identity'], i['services'], i['status'])
+      new(i['identity'], i['services'], i['status'], i['tags'])
+    end
+  end
+
+  # packet that means deregister an agent from the mappers
+  #
+  # from     is sender identity
+  class UnRegister < Packet
+    attr_accessor :identity
+    def initialize(identity)
+      @identity = identity
+    end
+    def self.json_create(o)
+      i = o['data']
+      new(i['identity'])
     end
   end
 

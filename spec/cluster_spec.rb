@@ -101,29 +101,29 @@ describe Nanite::Cluster do
 
     it "should use targets choosen by least loaded selector (:least_loaded)" do
       targets = { "target 3" => 3 }
-      request = mock("Request", :target => nil, :selector => :least_loaded, :type => "service")
-      @cluster.should_receive(:least_loaded).with("service").and_return(targets)
+      request = mock("Request", :target => nil, :selector => :least_loaded, :type => "service", :tags => [])
+      @cluster.should_receive(:least_loaded).with("service", []).and_return(targets)
       @cluster.targets_for(request).should == ["target 3"]
     end
 
     it "should use targets choosen by all selector (:all)" do
       targets = { "target 1" => 1, "target 2" => 2, "target 3" => 3 }
-      request = mock("Request", :target => nil, :selector => :all, :type => "service")
-      @cluster.should_receive(:all).with("service").and_return(targets)
+      request = mock("Request", :target => nil, :selector => :all, :type => "service", :tags => [])
+      @cluster.should_receive(:all).with("service", []).and_return(targets)
       @cluster.targets_for(request).should == ["target 1", "target 2", "target 3"]
     end
 
     it "should use targets choosen by random selector (:random)" do
       targets = { "target 3" => 3 }
-      request = mock("Request", :target => nil, :selector => :random, :type => "service")
-      @cluster.should_receive(:random).with("service").and_return(targets)
+      request = mock("Request", :target => nil, :selector => :random, :type => "service", :tags => [])
+      @cluster.should_receive(:random).with("service", []).and_return(targets)
       @cluster.targets_for(request).should == ["target 3"]
     end
 
     it "should use targets choosen by round-robin selector (:rr)" do
       targets = { "target 2" => 2 }
-      request = mock("Request", :target => nil, :selector => :rr, :type => "service")
-      @cluster.should_receive(:rr).with("service").and_return(targets)
+      request = mock("Request", :target => nil, :selector => :rr, :type => "service", :tags => [])
+      @cluster.should_receive(:rr).with("service", []).and_return(targets)
       @cluster.targets_for(request).should == ["target 2"]
     end
 
@@ -139,34 +139,34 @@ describe Nanite::Cluster do
       @amq = mock("AMQueue", :queue => @queue, :fanout => @fanout)
       @serializer = mock("Serializer")
       @reaper = mock("Reaper", :timeout => true)
+      Nanite::Log.stub!(:info)
       Nanite::Reaper.stub!(:new).and_return(@reaper)
       @cluster = Nanite::Cluster.new(@amq, 32, "the_identity", @serializer)
-      @nanite = mock("Nanite", :identity => "nanite_id", :services => "the_nanite_services", :status => "nanite_status")
+      @register_packet = Nanite::Register.new("nanite_id", ["the_nanite_services"], "nanite_status",[])
     end
 
     it "should add the Nanite to the nanites map" do
-      @cluster.register(@nanite)
-      @cluster.nanites.keys.should include('nanite_id')
+      @cluster.register(@register_packet)
       @cluster.nanites['nanite_id'].should_not be_nil
     end
 
     it "should use hash of the Nanite's services and status as value" do
-      @cluster.register(@nanite)
+      @cluster.register(@register_packet)
       @cluster.nanites['nanite_id'].keys.size == 2
       @cluster.nanites['nanite_id'].keys.should include(:services)
       @cluster.nanites['nanite_id'].keys.should include(:status)
-      @cluster.nanites['nanite_id'][:services].should ==  "the_nanite_services"
+      @cluster.nanites['nanite_id'][:services].should ==  ["the_nanite_services"]
       @cluster.nanites['nanite_id'][:status].should ==  "nanite_status"
     end
 
     it "should add nanite to reaper" do
       @reaper.should_receive(:timeout).with('nanite_id', 33)
-      @cluster.register(@nanite)
+      @cluster.register(@register_packet)
     end
 
     it "should log info message that nanite was registered" do
       Nanite::Log.should_receive(:info)
-      @cluster.register(@nanite)
+      @cluster.register(@register_packet)
     end
 
   end # Nanite Registration

@@ -5,7 +5,7 @@ module Nanite
     include ConsoleHelper
     include DaemonizeHelper
 
-    attr_reader :identity, :options, :serializer, :dispatcher, :registry, :amq
+    attr_reader :identity, :options, :serializer, :dispatcher, :registry, :amq, :tags
     attr_accessor :status_proc
 
     DEFAULT_OPTIONS = COMMON_DEFAULT_OPTIONS.merge({:user => 'nanite', :ping_time => 15,
@@ -46,6 +46,9 @@ module Nanite
     #
     # daemonize   : true tells Nanite to daemonize
     #
+    # pid_dir     : path to the directory where the agent stores its pid file (only if daemonized)
+    #               defaults to the root or the current working directory.
+    #
     # services    : list of services provided by this agent, by default
     #               all methods exposed by actors are listed
     #
@@ -68,11 +71,18 @@ module Nanite
     # options in the YAML file. However, when both Ruby code options
     # and YAML file specify option, Ruby code options take precedence.
     def self.start(options = {})
-      new(options)
+      agent = new(options)
+      agent.run
+      agent
     end
 
     def initialize(opts)
       set_configuration(opts)
+      @tags = []
+      @options.freeze
+    end
+    
+    def run
       log_path = false
       if @options[:daemonize]
         log_path = (@options[:log_dir] || @options[:root] || Dir.pwd)
@@ -92,9 +102,11 @@ module Nanite
       @registry = ActorRegistry.new
       @dispatcher = Dispatcher.new(@amq, @registry, @serializer, @identity, @options)
       load_actors
+      setup_traps
       setup_queue
       advertise_services
       setup_heartbeat
+      at_exit { un_register } unless $TESTING
       start_console if @options[:console] && !@options[:daemonize]
     end
 
@@ -145,6 +157,11 @@ module Nanite
         dispatcher.dispatch(packet)
       end
     end
+    
+    def tag(*tags)
+      tags.each {|t| @tags << t}
+      @tags.uniq!
+    end
 
     def setup_queue
       amq.queue(identity, :durable => true).subscribe(:ack => true) do |info, msg|
@@ -158,10 +175,25 @@ module Nanite
         amq.fanout('heartbeat', :no_declare => options[:secure]).publish(serializer.dump(Ping.new(identity, status_proc.call)))
       end
     end
+    
+    def setup_traps
+      ['INT', 'TERM'].each do |sig|
+        trap(sig) do
+          un_register
+          EM.add_timer(0.1) do
+            EM.stop
+          end
+        end
+      end
+    end
+    
+    def un_register
+      amq.fanout('registration', :no_declare => options[:secure]).publish(serializer.dump(UnRegister.new(identity)))
+    end
 
     def advertise_services
       Nanite::Log.debug("advertise_services: #{registry.services.inspect}")
-      amq.fanout('registration', :no_declare => options[:secure]).publish(serializer.dump(Register.new(identity, registry.services, status_proc.call)))
+      amq.fanout('registration', :no_declare => options[:secure]).publish(serializer.dump(Register.new(identity, registry.services, status_proc.call, self.tags)))
     end
 
     def parse_uptime(up)
