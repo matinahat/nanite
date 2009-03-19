@@ -2,9 +2,10 @@ module Nanite
   class JobWarden
     attr_reader :serializer, :jobs
 
-    def initialize(serializer)
+    def initialize(serializer, blk = nil)
       @serializer = serializer
       @jobs = {}
+      @recover = blk
     end
 
     def new_job(request, targets, blk = nil)
@@ -29,6 +30,9 @@ module Nanite
             end
           end
         end
+      else
+        Nanite::Log.debug("recovering message: #{msg.inspect}")
+        @recover.call(msg.results) if @recover
       end
     end
   end

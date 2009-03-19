@@ -81,13 +81,13 @@ module Nanite
     #            used AMQP brokers (RabbitMQ and ZeroMQ)
     #
     # @api :public:
-    def self.start(options = {})
-      mapper = new(options)
+    def self.start(options = {}, &blk)
+      mapper = new(options, &blk)
       mapper.run
       mapper
     end
 
-    def initialize(options)
+    def initialize(options, &blk)
       @options = DEFAULT_OPTIONS.clone.merge(options)
       root = options[:root] || @options[:root]
       custom_config = if root
@@ -101,6 +101,7 @@ module Nanite
       @identity = "mapper-#{@options[:identity]}"
       @options[:file_root] ||= File.join(@options[:root], 'files')
       @options.freeze
+      @recover = blk
     end
     
     def run
@@ -120,7 +121,7 @@ module Nanite
       end
       @amq = start_amqp(@options)
       @cluster = Cluster.new(@amq, @options[:agent_timeout], @options[:identity], @serializer, @options[:redis])
-      @job_warden = JobWarden.new(@serializer)
+      @job_warden = JobWarden.new(@serializer, @recover)
       Nanite::Log.info('starting mapper')
       setup_queues
       start_console if @options[:console] && !@options[:daemonize]
@@ -235,7 +236,11 @@ module Nanite
     end
 
     def setup_message_queue
-      amq.queue(identity, :exclusive => true).bind(amq.fanout(identity)).subscribe do |msg|
+       amq.queue(identity, {:durable => true,
+                            :persistent => true}).bind(amq.fanout(identity, {:durable => true,
+                                                                             :persistent => true})).subscribe(:ack => true) do |info, msg|
+                                # :persistent => true})).subscribe do |msg|
+                                info.ack
         job_warden.process(msg)
       end
     end

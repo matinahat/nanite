@@ -38,8 +38,8 @@ module Nanite
       @agent = Nanite::Agent.start(options)
     end
 
-    def start_mapper(options = {})
-      @mapper = Nanite::Mapper.start(options)
+    def start_mapper(options = {}, &blk)
+      @mapper = Nanite::Mapper.start(options, &blk)
     end
 
     def request(*args, &blk)
