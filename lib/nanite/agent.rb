@@ -101,6 +101,7 @@ module Nanite
       @amq = start_amqp(@options)
       @registry = ActorRegistry.new
       @dispatcher = Dispatcher.new(@amq, @registry, @serializer, @identity, @options)
+      setup_mapper_proxy
       load_actors
       setup_traps
       setup_queue
@@ -155,6 +156,12 @@ module Nanite
       when Request, Push
         Nanite::Log.debug("handling Request: #{packet}")
         dispatcher.dispatch(packet)
+      when Result
+        Nanite::Log.debug("handling Result: #{packet}")
+        @mapper_proxy.handle_result(packet)
+      when IntermediateMessage
+        Nanite::Log.debug("handling Intermediate Result: #{packet}")
+        @mapper_proxy.handle_intermediate_result(packet)
       end
     end
     
@@ -176,19 +183,27 @@ module Nanite
       end
     end
     
+    def setup_mapper_proxy
+      @mapper_proxy = MapperProxy.new(identity, options)
+    end
+    
     def setup_traps
       ['INT', 'TERM'].each do |sig|
-        trap(sig) do
+        old = trap(sig) do
           un_register
-          EM.add_timer(0.1) do
+          amq.instance_variable_get('@connection').close do
             EM.stop
+            old.call if old.is_a? Proc
           end
         end
       end
     end
     
     def un_register
-      amq.fanout('registration', :no_declare => options[:secure]).publish(serializer.dump(UnRegister.new(identity)))
+      unless @unregistered
+        @unregistered = true
+        amq.fanout('registration', :no_declare => options[:secure]).publish(serializer.dump(UnRegister.new(identity)))
+      end
     end
 
     def advertise_services
