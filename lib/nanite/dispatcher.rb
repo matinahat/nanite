@@ -1,6 +1,7 @@
 module Nanite
   class Dispatcher
     attr_reader :registry, :serializer, :identity, :amq, :options
+    attr_accessor :evmclass
 
     def initialize(amq, registry, serializer, identity, options)
       @amq = amq
@@ -8,16 +9,20 @@ module Nanite
       @serializer = serializer
       @identity = identity
       @options = options
+      @evmclass = EM
     end
 
     def dispatch(deliverable)
       prefix, meth = deliverable.type.split('/')[1..-1]
+      meth ||= :index
       actor = registry.actor_for(prefix)
 
-      EM.defer lambda {
+      @evmclass.defer(lambda {
         begin
           intermediate_results_proc = lambda { |*args| self.handle_intermediate_results(actor, meth, deliverable, *args) }
-          actor.send((meth.nil? ? :index : meth), deliverable.payload, &intermediate_results_proc)
+          args = [ deliverable.payload ]
+          args.push(deliverable) if actor.method(meth).arity == 2
+          actor.send(meth, *args, &intermediate_results_proc)
         rescue Exception => e
           handle_exception(actor, meth, deliverable, e)
         end
@@ -27,7 +32,7 @@ module Nanite
           amq.queue(deliverable.reply_to, :no_declare => options[:secure]).publish(serializer.dump(r))
         end
         r
-      }
+      })
     end
 
     protected
@@ -42,11 +47,11 @@ module Nanite
         raise ArgumentError, "handle_intermediate_results passed unexpected number of arguments (#{args.size})"
       end
       message = args.last
-      EM.defer lambda {
+      @evmclass.defer(lambda {
         [deliverable.reply_to, IntermediateMessage.new(deliverable.token, deliverable.reply_to, identity, messagekey, message)]
       }, lambda { |r|
         amq.queue(r.first, :no_declare => options[:secure]).publish(serializer.dump(r.last))
-      }
+      })
     end
 
     private
