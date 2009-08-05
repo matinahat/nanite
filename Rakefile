@@ -10,7 +10,7 @@ end
 require 'rake/clean'
 
 GEM = "nanite"
-VER = "0.4.0"
+VER = "0.4.1"
 AUTHOR = "Ezra Zygmuntowicz"
 EMAIL = "ezra@engineyard.com"
 HOMEPAGE = "http://github.com/ezmobius/nanite"
@@ -42,6 +42,8 @@ end
 Rake::GemPackageTask.new(spec) do |pkg|
   pkg.gem_spec = spec
 end
+
+task :default => :spec
 
 task :install => [:package] do
   sh %{sudo gem install pkg/#{GEM}-#{VER}}

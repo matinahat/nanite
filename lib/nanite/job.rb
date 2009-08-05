@@ -15,9 +15,6 @@ module Nanite
     end
 
     def process(msg)
-      msg = serializer.load(msg)
-      Nanite::Log.debug("processing message: #{msg.inspect}")
-
       if job = jobs[msg.token]
         job.process(msg)
 
@@ -31,6 +28,8 @@ module Nanite
           handler = job.intermediate_handler_for_key(key)
           if handler
             case handler.arity
+            when 2
+              handler.call(job.intermediate_state[msg.from][key].last, job)
             when 3
               handler.call(key, msg.from, job.intermediate_state[msg.from][key].last)
             when 4
@@ -60,7 +59,8 @@ module Nanite
   end # JobWarden
 
   class Job
-    attr_reader :results, :request, :token, :targets, :completed, :intermediate_state, :pending_keys, :intermediate_handler
+    attr_reader :results, :request, :token, :completed, :intermediate_state, :pending_keys, :intermediate_handler
+    attr_accessor :targets # This can be updated when a request gets picked up from the offline queue
 
     def initialize(request, targets, inthandler = nil, blk = nil)
       @request = request

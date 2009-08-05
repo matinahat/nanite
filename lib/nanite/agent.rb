@@ -52,6 +52,8 @@ module Nanite
     # services    : list of services provided by this agent, by default
     #               all methods exposed by actors are listed
     #
+    # single_threaded: Run all operations in one thread
+    #
     # Connection options:
     #
     # vhost    : AMQP broker vhost that should be used
@@ -90,7 +92,7 @@ module Nanite
         log_path = (@options[:log_dir] || @options[:root] || Dir.pwd)
       end
       Log.init(@identity, log_path)
-      Log.log_level = @options[:log_level] || :info
+      Log.level = @options[:log_level] if @options[:log_level]
       @serializer = Serializer.new(@options[:format])
       @status_proc = lambda { parse_uptime(`uptime`) rescue 'no status' }
       pid_file = PidFile.new(@identity, @options)
@@ -156,7 +158,7 @@ module Nanite
       actors = @options[:actors]
       Dir["#{actors_dir}/*.rb"].each do |actor|
         next if actors && !actors.include?(File.basename(actor, ".rb"))
-        Nanite::Log.info("loading actor: #{actor}")
+        Nanite::Log.info("[setup] loading #{actor}")
         require actor
       end
       init_path = @options[:initrb] || File.join(options[:root], 'init.rb')
@@ -164,26 +166,27 @@ module Nanite
     end
 
     def receive(packet)
-      packet = serializer.load(packet)
+      Nanite::Log.debug("RECV #{packet.to_s}")
       case packet
       when Advertise
-        Nanite::Log.debug("handling Advertise: #{packet}")
+        Nanite::Log.info("RECV #{packet.to_s}") unless Nanite::Log.level == Logger::DEBUG
         advertise_services
       when Request, Push
-        Nanite::Log.debug("handling Request: #{packet}")
         if @security && !@security.authorize(packet)
+          Nanite::Log.warn("RECV NOT AUTHORIZED #{packet.to_s}")
           if packet.kind_of?(Request)
             r = Result.new(packet.token, packet.reply_to, @deny_token, identity)
             amq.queue(packet.reply_to, :no_declare => options[:secure]).publish(serializer.dump(r))
           end
         else
+          Nanite::Log.info("RECV #{packet.to_s([:from, :tags])}") unless Nanite::Log.level == Logger::DEBUG
           dispatcher.dispatch(packet)
         end
       when Result
-        Nanite::Log.debug("handling Result: #{packet}")
+        Nanite::Log.info("RECV #{packet.to_s([])}") unless Nanite::Log.level == Logger::DEBUG
         @mapper_proxy.handle_result(packet)
       when IntermediateMessage
-        Nanite::Log.debug("handling Intermediate Result: #{packet}")
+        Nanite::Log.info("RECV #{packet.to_s([])}") unless Nanite::Log.level == Logger::DEBUG
         @mapper_proxy.handle_intermediate_result(packet)
       end
     end
@@ -195,8 +198,12 @@ module Nanite
 
     def setup_queue
       amq.queue(identity, :durable => true).subscribe(:ack => true) do |info, msg|
-        info.ack
-        receive(msg)
+        begin
+          info.ack
+          receive(serializer.load(msg))
+        rescue Exception => e
+          Nanite::Log.error("RECV #{e.message}")
+        end
       end
     end
 
@@ -225,13 +232,15 @@ module Nanite
     def un_register
       unless @unregistered
         @unregistered = true
+        Nanite::Log.info("SEND [un_register]")
         amq.fanout('registration', :no_declare => options[:secure]).publish(serializer.dump(UnRegister.new(identity)))
       end
     end
 
     def advertise_services
-      Nanite::Log.debug("advertise_services: #{registry.services.inspect}")
-      amq.fanout('registration', :no_declare => options[:secure]).publish(serializer.dump(Register.new(identity, registry.services, status_proc.call, self.tags)))
+      reg = Register.new(identity, registry.services, status_proc.call, self.tags)
+      Nanite::Log.info("SEND #{reg.to_s}")
+      amq.fanout('registration', :no_declare => options[:secure]).publish(serializer.dump(reg))
     end
 
     def parse_uptime(up)
